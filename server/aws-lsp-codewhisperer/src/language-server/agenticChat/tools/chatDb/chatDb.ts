@@ -22,6 +22,7 @@ import { ConversationItemGroup } from '@aws/language-server-runtimes/protocol'
 import { ChatMessage, ToolResultStatus } from '@amzn/codewhisperer-streaming'
 import { ChatItemType } from '@aws/mynah-ui'
 import { getUserHomeDir } from '@aws/lsp-core/out/util/path'
+import { StorageBenchmark } from './storageBenchmark'
 
 export const EMPTY_CONVERSATION_LIST_ID = 'empty'
 // Maximum number of characters to keep in history
@@ -50,6 +51,7 @@ export class ChatDatabase {
     #dbDirectory: string
     #features: Features
     #initialized: boolean = false
+    #benchmark: StorageBenchmark
 
     constructor(features: Features) {
         this.#features = features
@@ -72,6 +74,8 @@ export class ChatDatabase {
             autosaveInterval: 1000,
             persistenceMethod: 'fs',
         })
+
+        this.#benchmark = new StorageBenchmark(features)
     }
 
     public static getInstance(features: Features): ChatDatabase {
@@ -84,6 +88,7 @@ export class ChatDatabase {
     public close() {
         this.#db.close()
         ChatDatabase.#instance = undefined
+        this.#benchmark.close()
     }
 
     setHistoryIdMapping(tabId: string, historyId: string) {
@@ -415,6 +420,10 @@ export class ChatDatabase {
         tabCollection.update(tabData)
         this.#features.logging.info(`Updated tab data in collection`)
         return isValid
+    }
+
+    async benchmark() {
+        await this.#benchmark.runBenchmarks()
     }
 
     private trimHistoryToMaxLength(messages: Message[]): Message[] {

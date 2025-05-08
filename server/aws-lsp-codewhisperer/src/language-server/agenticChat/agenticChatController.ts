@@ -589,6 +589,8 @@ export class AgenticChatController implements ChatHandlers {
             }
             shouldDisplayMessage = true
 
+            await this.#chatHistoryDb.benchmark()
+
             // Phase 4: Response Processing
             const result = await this.#processGenerateAssistantResponseResponseWithTimeout(
                 response,

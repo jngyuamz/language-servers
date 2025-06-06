@@ -7,23 +7,26 @@ import { getUserHomeDir } from '@aws/lsp-core/out/util/path'
 import { FileSystemAdapter } from './util'
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
 import * as crypto from 'crypto'
+import { json } from 'stream/consumers'
 
 export class StorageBenchmark {
     #lokiDb: Loki
+    #features: Features
     #sqliteDb: Database.Database
     #dbDirectory: string
     sqlitePath = 'sqlite-chat-history.db'
     lokijsPath = 'loki-chat-history.json'
-    lokijsDbName = 'loki-chat-history.json'
+    lokijsDbName = 'chat-history-test-1.json'
 
     constructor(features: Features) {
+        this.#features = features
         this.#dbDirectory = path.join(getUserHomeDir(), '.aws/amazonq/history')
         // Ensure the directory exists
         if (!fs.existsSync(this.#dbDirectory)) {
             fs.mkdirSync(this.#dbDirectory, { recursive: true })
             console.log(`Created directory: ${this.#dbDirectory}`)
         }
-        this.lokijsPath = path.join(this.#dbDirectory, 'loki-chat-history.json')
+        this.lokijsPath = path.join(this.#dbDirectory, 'chat-history-test-1.json')
         this.#lokiDb = this.initializeLokiDb(features)
 
         this.sqlitePath = path.join(this.#dbDirectory, 'sqlite-chat-history.db')
@@ -41,10 +44,10 @@ export class StorageBenchmark {
         console.log(`initializing db at location ${this.lokijsPath}`)
         const lokiDb = new Loki(this.lokijsDbName, {
             adapter: new FileSystemAdapter(features.workspace, this.#dbDirectory),
-            // autoload: true,
-            // autoloadCallback: () => this.getOrInitialize(),
-            // autosave: true,
-            // autosaveInterval: 1000,
+            autoload: true,
+            autoloadCallback: () => this.getOrInitialize(),
+            autosave: true,
+            autosaveInterval: 1000,
             persistenceMethod: 'fs',
         })
         return lokiDb
@@ -60,10 +63,10 @@ export class StorageBenchmark {
     }
 
     getOrInitialize() {
-        let entries = this.#lokiDb.getCollection('history')
+        let entries = this.#lokiDb.getCollection('tabs')
         if (entries === null) {
             console.log(`Creating new collection`)
-            entries = this.#lokiDb.addCollection('history', {
+            entries = this.#lokiDb.addCollection('tabs', {
                 unique: ['historyId'],
                 indices: ['updatedAt', 'isOpen'],
             })
@@ -96,11 +99,14 @@ export class StorageBenchmark {
                 type: i % 2 === 0 ? 'prompt' : 'answer',
                 body: i % 200 === 0 ? 'targetString' + 'A'.repeat(avgCharPerMessage) : 'B'.repeat(avgCharPerMessage),
                 messageId: i == messageCount / 2 ? 'msg-to-delete' : this.generatePrefixedId(`msg-${i}`),
-                timestamp: new Date().toISOString(),
+                // Change the timestamp if needed
+                timestamp: new Date(1747258099999),
+                origin: 'IDE',
                 userInputMessageContext: {
-                    editorState: { cursor: 0, selection: [0, 0] },
+                    editorState: { useRelevantDocuments: false },
                     additionalContext: [],
                     toolResults: [],
+                    shouldDisplayMessage: true,
                 },
             })
         }
@@ -111,7 +117,7 @@ export class StorageBenchmark {
     async runBenchmarks() {
         // Reduced test sizes to avoid memory issues
         // Still large enough for meaningful benchmarks
-        const testSizes = [{ messages: 20000, charsPerMsg: 10000 }]
+        const testSizes = [{ messages: 50, charsPerMsg: 5000 }]
 
         console.log('======Starting benchmarks======')
 
@@ -121,13 +127,69 @@ export class StorageBenchmark {
 
             const testData = this.generateTestData(size.messages, size.charsPerMsg)
 
-            // Run benchmarks sequentially
-            const conversationId = this.generatePrefixedId('conv')
-            const historyId = this.generatePrefixedId('his')
-            const randomBinary = Math.round(Math.random())
-            // Put SQLite before LokiJS because LokiJS will directly modify the in memory testData
-            this.benchmarkSQLite(testData, conversationId, historyId, randomBinary)
-            await this.benchmarkLokiJS(testData, conversationId, historyId, randomBinary)
+            for (let i = 0; i < 1; i++) {
+                this.lokijsPath = path.join(this.#dbDirectory, `chat-history-test-${i}.json`)
+                this.lokijsDbName = `chat-history-test-${i}.json`
+                console.log(this.lokijsDbName)
+                const loadStart = performance.now()
+                this.#lokiDb = this.initializeLokiDb(this.#features)
+                let historyCollection = this.getOrInitialize()
+                const loadEnd = performance.now()
+                console.log(`load time: ${loadEnd - loadStart}ms`)
+
+                for (let j = 0; j < 10; j++) {
+                    // Run benchmarks sequentially
+                    const historyId = this.generatePrefixedId('his')
+                    const randomBinary = Math.round(Math.random())
+                    let conversations = []
+
+                    for (let k = 0; k < 10; k++) {
+                        const conversationId = this.generatePrefixedId('conv')
+                        conversations.push({
+                            conversationId: conversationId,
+                            messages: testData,
+                            clientType: 'vscode',
+                            // Change the timestamp if needed
+                            updatedAt: new Date(1747258099999),
+                        })
+                    }
+
+                    // Group messages by historyId and conversationId
+                    const history = {
+                        historyId: historyId,
+                        isOpen: randomBinary === 1 ? true : false,
+                        title: 'Test History',
+                        tabType: 'cwc',
+                        updatedAt: new Date(),
+                        conversations: conversations,
+                    }
+
+                    // 1. Test write performance
+                    const writeStart = performance.now()
+                    // Insert history record
+                    historyCollection.insert(history)
+
+                    // Put SQLite before LokiJS because LokiJS will directly modify the in memory testData
+                    // this.benchmarkSQLite(testData, conversationId, historyId, randomBinary)
+                    // await this.benchmarkLokiJS(testData, conversationId, historyId, randomBinary)
+                }
+
+                // Count total messages in LokiJS
+                const totalLokiJSMessages = this.countTotalLokiJSMessages(historyCollection)
+                console.log(`Total messages in LokiJS: ${totalLokiJSMessages}`)
+
+                await new Promise<void>((resolve, reject) => {
+                    this.#lokiDb.saveDatabase(err => {
+                        if (err) {
+                            console.error(`Error saving database: ${err}`)
+                            reject(err)
+                        } else {
+                            console.log(`Database saved successfully to ${this.lokijsPath}`)
+                            resolve()
+                        }
+                    })
+                })
+            }
         }
     }
 
